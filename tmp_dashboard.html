@@ -1,0 +1,156 @@
+﻿
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Trading Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px }
+    table { border-collapse: collapse; width: 100% }
+    th, td { padding: 8px; border: 1px solid #ddd }
+    th { background: #f4f4f4 }
+    .negative { color: red }
+    .positive { color: green }
+  </style>
+</head>
+<body>
+  <div style="display:flex;align-items:center;justify-content:space-between;">
+    <h1>ALGO TRADER - By RB</h1>
+    <div style="display:flex; gap: 12px; align-items:center;">
+      <div><strong>WS:</strong> <span id="wsStatus">disconnected</span></div>
+      <button id="filterRejected">Show only rejected</button>
+    </div>
+  </div>
+  <div>
+    <strong>Daily realized PnL:</strong> <span id="daily">-</span>
+  </div>
+  <h2>Tickers</h2>
+  <table id="tbl">
+    <thead><tr><th>Symbol</th><th>Position</th><th>Last Price</th><th>Realized</th><th>Unrealized</th><th>Cumulative</th></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+
+  <h2>Recent Trades</h2>
+  <table id="trades">
+    <thead><tr><th>ID</th><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>P/L</th><th>Status</th></tr></thead>
+
+  <script>
+    // WebSocket connection with reconnect and status indicator
+    let ws = null
+    let reconnectInterval = 2000
+    function setStatus(s) {
+      const el = document.getElementById('wsStatus')
+      if (!el) return
+      el.textContent = s
+    }
+
+    function connectWS() {
+      ws = new WebSocket(`ws://${location.host}/dashboard/ws/trades`)
+
+      ws.onmessage = function(e) {
+        const payload = JSON.parse(e.data)
+        if (payload.type === 'pnl_update') {
+          document.getElementById('daily').textContent = payload.daily_realized
+          const tbl = document.getElementById('body')
+          tbl.innerHTML = ''
+          payload.tickers.forEach(t => {
+            const tr = document.createElement('tr')
+            const cls = n => n<0 ? 'negative' : 'positive'
+            tr.innerHTML = `<td>${t.symbol}</td><td>${t.position}</td><td>${t.last_price ?? '-'}</td><td class='${cls(t.realized)}'>${t.realized}</td><td class='${cls(t.unrealized)}'>${t.unrealized}</td><td class='${cls(t.cumulative)}'>${t.cumulative}</td>`
+            tbl.appendChild(tr)
+          })
+        } else if (payload.type === 'new_trade') {
+          const tr = document.createElement('tr')
+          const td = (v) => `<td>${v}</td>`
+          const statusText = payload.trade.status || ''
+          // Mark entire row red if status is not 'Filled'
+          if (statusText.toLowerCase().indexOf('filled') !== 0) {
+            tr.classList.add('negative')
+          }
+          // P/L cell: show '-' when null
+          const pnl = payload.trade.pnl == null ? '-' : payload.trade.pnl
+          const pnlClass = (pnl === '-' ? '' : (pnl < 0 ? 'negative' : 'positive'))
+          tr.innerHTML = td(payload.trade.id) + td(payload.trade.timestamp) + td(payload.trade.symbol) + td(payload.trade.side) + td(payload.trade.qty) + td(payload.trade.price) + `<td class='${pnlClass}'>${pnl}</td>` + `<td>${statusText}</td>`
+          const body = document.getElementById('trades_body')
+          body.insertBefore(tr, body.firstChild)
+          if (filterRejectedActive) applyFilter()
+        }
+      }
+
+      ws.onopen = function() {
+        console.log('WS open')
+        setStatus('connected')
+        reconnectInterval = 2000
+      }
+      ws.onclose = function() {
+        console.log('WS closed')
+        setStatus('disconnected')
+        // try reconnect with backoff
+        setTimeout(() => {
+          reconnectInterval = Math.min(30000, reconnectInterval * 1.5)
+          connectWS()
+        }, reconnectInterval)
+      }
+      ws.onerror = function() {
+        setStatus('error')
+      }
+    }
+
+    // start connection
+    connectWS()
+
+    // filter state
+    let filterRejectedActive = false
+    const filterBtn = document.getElementById('filterRejected')
+    function applyFilter() {
+      const rows = document.querySelectorAll('#trades_body tr')
+      rows.forEach(r => {
+        if (filterRejectedActive) {
+          if (!r.classList.contains('negative')) r.style.display = 'none'
+        } else {
+          r.style.display = ''
+        }
+      })
+      filterBtn.textContent = filterRejectedActive ? 'Show all trades' : 'Show only rejected'
+    }
+    filterBtn.addEventListener('click', () => { filterRejectedActive = !filterRejectedActive; applyFilter() })
+
+    // initial fetch of PnL and recent trades
+    fetch('/dashboard/api/pnl').then(r => r.json()).then(d => {
+      document.getElementById('daily').textContent = d.daily_realized
+
+      const tbl = document.getElementById('body')
+      tbl.innerHTML = ''
+      d.tickers.forEach(t => {
+        const tr = document.createElement('tr')
+        const cls = n => n<0 ? 'negative' : 'positive'
+        tr.innerHTML = `<td>${t.symbol}</td><td>${t.position}</td><td>${t.last_price ?? '-'}</td><td class='${cls(t.realized)}'>${t.realized}</td><td class='${cls(t.unrealized)}'>${t.unrealized}</td><td class='${cls(t.cumulative)}'>${t.cumulative}</td>`
+        tbl.appendChild(tr)
+      })
+
+      // Populate recent trades (including rejected/error trades)
+      const tbody = document.getElementById('trades_body')
+      tbody.innerHTML = ''
+      if (d.trades && d.trades.length) {
+        d.trades.forEach(trade => {
+          const tr = document.createElement('tr')
+          const td = (v) => `<td>${v}</td>`
+          // Highlight rejected/error statuses
+          const statusText = trade.status
+          // Mark entire row red if status is not 'Filled'
+          if (!(statusText && statusText.toLowerCase().startsWith('filled'))) {
+            tr.classList.add('negative')
+          }
+          // P/L cell
+          const pnl = trade.pnl == null ? '-' : trade.pnl
+          const pnlClass = (pnl === '-' ? '' : (pnl < 0 ? 'negative' : 'positive'))
+          const statusCell = `<td>${statusText}</td>`
+          tr.innerHTML = td(trade.id) + td(trade.timestamp) + td(trade.symbol) + td(trade.side) + td(trade.qty) + td(trade.price) + `<td class='${pnlClass}'>${pnl}</td>` + statusCell
+          tbody.appendChild(tr)
+        })
+      }
+      applyFilter()
+    })
+  </script>
+</body>
+</html>
